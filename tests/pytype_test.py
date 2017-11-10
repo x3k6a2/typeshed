@@ -12,12 +12,15 @@ import re
 import sys
 import argparse
 import subprocess
+import tempfile
 import collections
 
 parser = argparse.ArgumentParser(description="Pytype tests.")
 parser.add_argument('-n', '--dry-run', action='store_true', help="Don't actually run tests")
 parser.add_argument('--num-parallel', type=int, default=1,
                     help="Number of test processes to spawn")
+parser.add_argument('--py_version', type=str, default="2.7",
+                    help="Tested python version.")
 
 
 def main():
@@ -42,17 +45,26 @@ def load_blacklist():
 
 class PytdRun(object):
     def __init__(self, args, dry_run=False):
-        self.args = args
+        self.args = []
+        temp = tempfile.NamedTemporaryFile(delete=False)
+        temp.close()  # Windows compat.
+        self.args.extend([
+            '--convert-to-pickle=%s' % temp.name,
+            ])
+        self.args.extend(args)
+
         self.dry_run = dry_run
         self.results = None
 
         if dry_run:
             self.results = (0, "", "")
         else:
+            #print "args: %s" % self.args
             self.proc = subprocess.Popen(
-                ["pytd"] + args,
+                ["pytype"] + self.args,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE)
+        os.remove(temp.name)
 
     def communicate(self):
         if self.results:
@@ -73,19 +85,31 @@ def pytype_test(args):
     wanted = re.compile(r"stdlib/.*\.pyi$")
     skipped = re.compile("(%s)$" % "|".join(load_blacklist()))
     files = []
+    major_py_version = args.py_version.split(".")[0]
 
     for root, _, filenames in os.walk("stdlib"):
         for f in sorted(filenames):
-            f = os.path.join(root, f)
-            if wanted.search(f) and not skipped.search(f):
-                files.append(f)
-
+            if "stdlib/%s" % major_py_version in root or "2and3" in root:
+                f = os.path.join(root, f)
+                if wanted.search(f):
+                   if not skipped.search(f):
+                     print ("wanted: %s" % f)
+                     files.append(f)
+                   else:
+                     print ("skipped: %s" % f)
+                else:
+                  print ("unwanted: %s" % f)
     running_tests = collections.deque()
     max_code, runs, errors = 0, 0, 0
     print("Running pytype tests...")
+    failed = []
     while 1:
         while files and len(running_tests) < args.num_parallel:
-            test_run = PytdRun([files.pop()], dry_run=args.dry_run)
+            f = files.pop()
+            test_run = PytdRun([
+                "--python_version=%s" % args.py_version,
+                f,
+            ], dry_run=args.dry_run)
             running_tests.append(test_run)
 
         if not running_tests:
@@ -97,10 +121,12 @@ def pytype_test(args):
         runs += 1
 
         if code:
-            print("pytd error processing \"%s\":" % test_run.args[0])
+            failed.append(test_run.args[2])
             print(stderr)
             errors += 1
 
+    for f in sorted(failed):
+      print "%s" % f
     print("Ran pytype with %d pyis, got %d errors." % (runs, errors))
     return max_code, runs
 
